@@ -1,16 +1,23 @@
-"""Transcribe a video with ElevenLabs Scribe.
+"""Transcribe a video, locally with Whisper or with ElevenLabs Scribe.
 
-Extracts mono 16kHz audio via ffmpeg, uploads to Scribe with verbatim +
-diarize + audio events + word-level timestamps, writes the full response
-to <edit_dir>/transcripts/<video_stem>.json.
+Extracts mono 16kHz audio via ffmpeg, then either:
+  - local:      runs faster-whisper on this machine (offline, free), or
+  - elevenlabs: uploads to Scribe with verbatim + diarize + audio events.
+Both write the same word-level JSON to <edit_dir>/transcripts/<video_stem>.json.
 
-Cached: if the output file already exists, the upload is skipped.
+Backend: --backend, or VIDEO_USE_TRANSCRIBE_BACKEND. If neither is set,
+ElevenLabs is used when an API key is configured, local otherwise.
+
+Cached: if the output file already exists, transcription is skipped.
 
 Usage:
     python helpers/transcribe.py <video_path>
+    python helpers/transcribe.py <video_path> --backend local
+    python helpers/transcribe.py <video_path> --backend local --model small
+    python helpers/transcribe.py <video_path> --backend local --vocab "Beachread, Dima"
     python helpers/transcribe.py <video_path> --edit-dir /custom/edit
     python helpers/transcribe.py <video_path> --language en
-    python helpers/transcribe.py <video_path> --num-speakers 2
+    python helpers/transcribe.py <video_path> --num-speakers 2   (ElevenLabs only)
 """
 
 from __future__ import annotations
@@ -33,7 +40,10 @@ import requests
 SCRIBE_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 
 
-def load_api_key() -> str:
+BACKENDS = ("local", "elevenlabs")
+
+
+def load_api_key(required: bool = True) -> str:
     for candidate in [Path(__file__).resolve().parent.parent / ".env", Path(".env")]:
         if candidate.exists():
             for line in candidate.read_text().splitlines():
@@ -42,11 +52,24 @@ def load_api_key() -> str:
                     continue
                 k, v = line.split("=", 1)
                 if k.strip() == "ELEVENLABS_API_KEY":
-                    return v.strip().strip('"').strip("'")
+                    v = v.strip().strip('"').strip("'")
+                    if v:
+                        return v
     v = os.environ.get("ELEVENLABS_API_KEY", "")
-    if not v:
-        sys.exit("ELEVENLABS_API_KEY not found in .env or environment")
+    if not v and required:
+        sys.exit("ELEVENLABS_API_KEY not found in .env or environment "
+                 "(or use --backend local to transcribe offline)")
     return v
+
+
+def resolve_backend(explicit: str | None = None) -> str:
+    """Pick the transcription backend: flag, then env, then key presence."""
+    choice = explicit or os.environ.get("VIDEO_USE_TRANSCRIBE_BACKEND", "").strip().lower()
+    if choice:
+        if choice not in BACKENDS:
+            sys.exit(f"unknown backend {choice!r}; choose one of {', '.join(BACKENDS)}")
+        return choice
+    return "elevenlabs" if load_api_key(required=False) else "local"
 
 
 def count_audio_tracks(video_path: Path) -> int:
@@ -128,11 +151,14 @@ def transcript_path(edit_dir: Path, video: Path, audio_track: int = 0) -> Path:
 def transcribe_one(
     video: Path,
     edit_dir: Path,
-    api_key: str,
+    api_key: str = "",
     language: str | None = None,
     num_speakers: int | None = None,
     verbose: bool = True,
     audio_track: int = 0,
+    backend: str = "elevenlabs",
+    model: str | None = None,
+    vocab: str | None = None,
 ) -> Path:
     """Transcribe a single video. Returns path to transcript JSON.
 
@@ -173,9 +199,16 @@ def transcribe_one(
             )
 
         size_mb = audio.stat().st_size / (1024 * 1024)
-        if verbose:
-            print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
-        payload = call_scribe(audio, api_key, language, num_speakers)
+        if backend == "local":
+            from local_transcribe import model_name, transcribe_local
+            if verbose:
+                print(f"  transcribing {video.stem}.wav locally ({size_mb:.1f} MB, "
+                      f"model {model_name(model)})", flush=True)
+            payload = transcribe_local(audio, language, model, vocab)
+        else:
+            if verbose:
+                print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
+            payload = call_scribe(audio, api_key, language, num_speakers)
 
     out_path.write_text(json.dumps(payload, indent=2))
     dt = time.time() - t0
@@ -190,8 +223,29 @@ def transcribe_one(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Transcribe a video with ElevenLabs Scribe")
+    ap = argparse.ArgumentParser(description="Transcribe a video locally or with ElevenLabs Scribe")
     ap.add_argument("video", type=Path, help="Path to video file")
+    ap.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default=None,
+        help="local (offline Whisper) or elevenlabs. Default: elevenlabs if a key "
+             "is set, else local. Env: VIDEO_USE_TRANSCRIBE_BACKEND.",
+    )
+    ap.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Whisper model for --backend local (default large-v3-turbo; "
+             "small or base are faster). Env: VIDEO_USE_WHISPER_MODEL.",
+    )
+    ap.add_argument(
+        "--vocab",
+        type=str,
+        default=None,
+        help='Comma-separated names and brand terms for --backend local, e.g. "Beachread, Dima". '
+             "Env: VIDEO_USE_VOCAB.",
+    )
     ap.add_argument(
         "--edit-dir",
         type=Path,
@@ -225,7 +279,8 @@ def main() -> None:
         sys.exit(f"video not found: {video}")
 
     edit_dir = (args.edit_dir or (video.parent / "edit")).resolve()
-    api_key = load_api_key()
+    backend = resolve_backend(args.backend)
+    api_key = load_api_key() if backend == "elevenlabs" else ""
 
     transcribe_one(
         video=video,
@@ -234,6 +289,9 @@ def main() -> None:
         language=args.language,
         num_speakers=args.num_speakers,
         audio_track=args.audio_track,
+        backend=backend,
+        model=args.model,
+        vocab=args.vocab,
     )
 
 

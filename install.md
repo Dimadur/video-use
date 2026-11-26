@@ -1,6 +1,6 @@
 ---
 name: video-use-install
-description: Install video-use into the current agent (Claude Code, Codex, Hermes, Openclaw, etc.) and wire up ffmpeg + the ElevenLabs API key so the user can start editing immediately.
+description: Install video-use into the current agent (Claude Code, Codex, Hermes, Openclaw, etc.) and wire up ffmpeg + local transcription (ElevenLabs optional) so the user can start editing immediately.
 ---
 
 # video-use install
@@ -15,7 +15,7 @@ Three things must exist on this machine:
 
 1. The `video-use` repo cloned somewhere stable.
 2. `ffmpeg` on `$PATH` (plus optional `yt-dlp` for online sources).
-3. An ElevenLabs API key in `.env` at the repo root (for Scribe transcription).
+3. faster-whisper in the repo venv for local transcription (an ElevenLabs key is optional).
 
 And one thing must be true about the current agent:
 
@@ -23,7 +23,7 @@ And one thing must be true about the current agent:
 
 ## Install prompt contract
 
-- Do everything yourself. Only ask the user for things you cannot generate — the ElevenLabs API key, and confirmation before `brew install`.
+- Do everything yourself. Only ask the user for things you cannot generate — confirmation before `brew install`, and an ElevenLabs API key only if they want Scribe.
 - Prefer a stable clone path like `~/Developer/video-use` (not `/tmp`, not `~/Downloads`).
 - The skill references helpers by bare name (`transcribe.py`, `render.py`). That works because SKILL.md and `helpers/` ship together — keep them as siblings when you register the skill.
 - After install, verify by running one real command against one real file. Don't declare success on file-existence checks alone.
@@ -89,24 +89,28 @@ Figure out which agent you are running under, and register once. A symlink of th
 
 If you can't tell which agent you're in, ask the user once: "which agent am I running under — Claude Code, Codex, or something else?" Then pick the right target.
 
-### 5. ElevenLabs API key
+### 5. Transcription: local by default, ElevenLabs optional
 
-Scribe (ElevenLabs) does all transcription. Without a key, nothing transcribes.
+This fork transcribes **locally** with faster-whisper: offline, free, no key. Install it into the repo venv:
 
-1. Check existing state in this order and stop at the first hit:
+```bash
+cd ~/Developer/video-use
+python3 -m venv .venv
+.venv/bin/pip install -e ".[local]"
+```
+
+The Whisper model (`large-v3-turbo`, ~1.6 GB) downloads on first use and is cached. Don't trigger the download at install time.
+
+ElevenLabs Scribe is optional. It adds speaker diarization and audio events like (laughter), with slightly tighter timestamps, and costs money per minute. Only set it up if the user asks for it:
+
+1. Check whether a key already exists:
 
     ```bash
-    # a) env var already exported
     [ -n "$ELEVENLABS_API_KEY" ] && echo "env"
-    # b) .env at repo root already has it
     grep -q '^ELEVENLABS_API_KEY=..' ~/Developer/video-use/.env 2>/dev/null && echo "dotenv"
     ```
 
-2. If neither is set, ask the user exactly once:
-
-    > I need an ElevenLabs API key for transcription (word-level timestamps, speaker diarization, filler tagging). Grab one at https://elevenlabs.io/app/settings/api-keys and paste it here — I'll write it to `~/Developer/video-use/.env`. Or if you already have it exported as `ELEVENLABS_API_KEY`, say "use env" and I'll skip.
-
-    When the user pastes a key, write it to `~/Developer/video-use/.env`:
+2. If not, ask the user once to paste a key from https://elevenlabs.io/app/settings/api-keys and write it:
 
     ```bash
     printf 'ELEVENLABS_API_KEY=%s\n' "$KEY" > ~/Developer/video-use/.env
@@ -115,7 +119,7 @@ Scribe (ElevenLabs) does all transcription. Without a key, nothing transcribes.
 
     Never echo the key back in tool output. Never commit `.env`.
 
-3. Sanity check with a cheap, quota-free call:
+3. Sanity check with a quota-free call:
 
     ```bash
     curl -s -o /dev/null -w '%{http_code}\n' \
@@ -123,7 +127,9 @@ Scribe (ElevenLabs) does all transcription. Without a key, nothing transcribes.
       https://api.elevenlabs.io/v1/user
     ```
 
-    `200` means the key works. `401` means the user pasted a wrong/expired key — ask once more and stop. Anything else (network, 5xx), move on and verify during first real transcription.
+    `200` means the key works; `401` means a wrong or expired key.
+
+With a key set, Scribe becomes the default. `--backend local` or `VIDEO_USE_TRANSCRIBE_BACKEND=local` switches back.
 
 ### 6. Verify end-to-end
 
@@ -134,7 +140,7 @@ python ~/Developer/video-use/helpers/timeline_view.py --help >/dev/null && echo 
 ffprobe -version | head -1
 ```
 
-Full transcription test is optional at install time — it burns Scribe credits. Better to wait until the user hands you their first clip.
+Full transcription test is optional at install time — it downloads the Whisper model (or burns Scribe credits). Better to wait until the user hands you their first clip.
 
 ### 7. Hand off
 

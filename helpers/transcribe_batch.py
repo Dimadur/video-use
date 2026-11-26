@@ -1,13 +1,15 @@
 """Batch-transcribe every video in a directory with 4 parallel workers.
 
-Walks <videos_dir> for common video extensions, runs ElevenLabs Scribe on
-each, writes transcripts to <videos_dir>/edit/transcripts/<name>.json.
+Walks <videos_dir> for common video extensions, transcribes each locally
+(Whisper) or with ElevenLabs Scribe (see transcribe.py for how the backend
+is picked), writes transcripts to <videos_dir>/edit/transcripts/<name>.json.
 
 Cached per-file: any source that already has a transcript is skipped.
 
 Usage:
     python helpers/transcribe_batch.py <videos_dir>
     python helpers/transcribe_batch.py <videos_dir> --workers 4
+    python helpers/transcribe_batch.py <videos_dir> --backend local
     python helpers/transcribe_batch.py <videos_dir> --num-speakers 2
     python helpers/transcribe_batch.py <videos_dir> --edit-dir /custom/edit
 """
@@ -20,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from transcribe import load_api_key, transcribe_one, transcript_path
+from transcribe import BACKENDS, load_api_key, resolve_backend, transcribe_one, transcript_path
 
 
 VIDEO_EXTS = {".mp4", ".MP4", ".mov", ".MOV", ".mkv", ".MKV", ".avi", ".AVI", ".m4v"}
@@ -44,6 +46,12 @@ def main() -> None:
         help="Edit output directory (default: <videos_dir>/edit)",
     )
     ap.add_argument("--workers", type=int, default=4, help="Parallel workers (default: 4)")
+    ap.add_argument("--backend", choices=BACKENDS, default=None,
+                    help="local (offline Whisper) or elevenlabs. Default: elevenlabs if a key is set, else local.")
+    ap.add_argument("--model", type=str, default=None,
+                    help="Whisper model for --backend local (default large-v3-turbo).")
+    ap.add_argument("--vocab", type=str, default=None,
+                    help='Comma-separated names and brand terms for --backend local, e.g. "Beachread, Dima".')
     ap.add_argument(
         "--language",
         type=str,
@@ -84,9 +92,11 @@ def main() -> None:
         print("nothing to do")
         return
 
-    api_key = load_api_key()
+    backend = resolve_backend(args.backend)
+    api_key = load_api_key() if backend == "elevenlabs" else ""
 
-    print(f"transcribing {len(pending)} files with {args.workers} parallel workers")
+    # Local decoding runs one file at a time (workers still extract audio in parallel).
+    print(f"transcribing {len(pending)} files with {args.workers} parallel workers ({backend})")
     t0 = time.time()
 
     errors: list[tuple[Path, str]] = []
@@ -101,6 +111,9 @@ def main() -> None:
                 num_speakers=args.num_speakers,
                 verbose=False,
                 audio_track=args.audio_track,
+                backend=backend,
+                model=args.model,
+                vocab=args.vocab,
             ): v
             for v in pending
         }

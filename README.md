@@ -1,3 +1,16 @@
+> **Fork note — local-first video-use.** This fork by [Dimadur](https://github.com/Dimadur) adds **offline transcription** with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), so video-use runs with no API key and no per-minute cost.
+>
+> **What changed and why**
+> - `helpers/local_transcribe.py`: new local backend that writes the same word-level JSON as ElevenLabs Scribe, so cutting, subtitles and timeline views work unchanged.
+> - `--backend local|elevenlabs` on `transcribe.py` and `transcribe_batch.py`. Local is the default when no ElevenLabs key is set.
+> - `--vocab "Beachread, Dima"` biases the model toward product and people names, so subtitles spell them right.
+> - A verbatim prompt keeps filler words ("um", "uh") that plain Whisper drops, since cutting them is the point.
+> - Install: `pip install -e ".[local]"`.
+>
+> **Trade-offs vs. Scribe:** no speaker diarization (everyone is `S0`), no audio events like (laughter), and word timings drift a little more (about 0.1–0.3s), so cuts get slightly more padding.
+>
+> Part of my [command center](https://github.com/Dimadur) of forked, local-first tools. Upstream: [browser-use/video-use](https://github.com/browser-use/video-use).
+
 <p align="center">
   <img src="static/video-use-banner.png" alt="video-use" width="100%">
 </p>
